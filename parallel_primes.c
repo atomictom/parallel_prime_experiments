@@ -6399,10 +6399,17 @@ void * compute_primes(void * args){
 		sieving_num += multiple_from_wheel(&wheel_index);
 	}
 
-	/* ---------- Find count and sum ---------- */
+	/* ---------- Wait for all threads to finish ---------- */
+	// I want to change this so as soon as a thread is finished, 
+	// it can start on the next section (safely)
+	pthread_barrier_wait(stats->barrier);
+
+	/* ---------- Find count and sum and list of primes ---------- */
 	int64_t count = 0;
 	int64_t sum = 0;
 	int64_t index;
+
+	stats->primes_arr = (primes_t *) malloc(sizeof(primes_t) * ((PRIME_LIMIT / NUM_THREADS) + 1));
 
 	wheel_index = initial_index;
 	for(index = start; index <= PRIME_LIMIT; index += multiple_from_wheel(&wheel_index)){
@@ -6414,38 +6421,6 @@ void * compute_primes(void * args){
 
 	stats->sum = sum;
 	stats->count = count;
-
-	return NULL;
-}
-
-void * record_primes(void * args){
-	struct prime_stats_t * stats = (struct prime_stats_t *)args;
-	int thread_id = stats->thread_id;
-
-	stats->primes_arr = (primes_t *) malloc(sizeof(primes_t) * ((PRIME_LIMIT / NUM_THREADS) + 1));
-
-	int64_t i;
-
-	int start = START_PRIME;
-	int index = 0;
-	for(i = 0; i < thread_id; i++){
-		start += next_from_wheel(&index);
-	}
-
-	for(i = start; i <= PRIME_LIMIT; i += multiple_from_wheel(&index)){
-		if(IS_PRIME(sieve, i)){
-		}
-	}
-
-	return NULL;
-}
-
-void * find_and_record_primes(void * args){
-	struct prime_stats_t * stats = (struct prime_stats_t *)args;
-
-	compute_primes(stats);
-	pthread_barrier_wait(stats->barrier);
-	count_and_sum_primes(stats);
 
 	return NULL;
 }

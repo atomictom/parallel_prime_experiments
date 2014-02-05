@@ -27,13 +27,10 @@
 /* --------------- Options --------------- */
 // PERFORMANCE
 #define NUM_THREADS 8
-#define PRIME_LIMIT ((int)1e8)
+#define PRIME_LIMIT (100000000)
 #define WHEEL_COUNT 7
 #define USE_BITSET
-#define START_AT_SQUARE_OF_PRIME
-#define UPTO_SQRT_OF_LIMIT
 #define PARALLEL_PRIME_COUNT
-// This one isn't as useful since multiple_from_wheel doesn't get called much
 #define USE_WHEEL_CACHE
 
 // PRINTING
@@ -43,13 +40,20 @@
 /* #define PRINT_SUM */
 /* #define PRINT_LAST_10 */
 
-// DEBUG
-/* #define CHECK_NUM_TIMES_VISITED */
+/* --------------- Types --------------- */
+#if PRIME_LIMIT > 1000000000
+	typedef int64_t primes_t;
+#else
+	typedef int primes_t;
+#endif
 
 /* --------------- Prototypes --------------- */
 void bitset(unsigned char * array, int index);
 int bittest(unsigned char * array, int64_t index);
 void * compute_primes(void * arg);
+void * record_primes(void * args);
+void * count_and_sum_primes(void * args);
+void * find_and_record_primes(void * args);
 void init_wheel_cache();
 int main(void);
 inline int multiple_from_wheel(int * index);
@@ -57,9 +61,10 @@ inline int next_from_wheel(int * index);
 
 /* --------------- Structs --------------- */
 struct prime_stats_t{
-	int64_t sum;
-	int count;
 	int thread_id;
+	int64_t sum;
+	primes_t count;
+	primes_t * primes_arr;
 	pthread_barrier_t * barrier;
 };
 
@@ -6356,18 +6361,6 @@ inline int multiple_from_wheel(int * index){
 }
 #endif
 
-/* --------------- Check for repeated work --------------- */
-#ifdef CHECK_NUM_TIMES_VISITED
-	int visited[PRIME_LIMIT] = {0};
-#endif
-
-/* --------------- Efficiency Macros --------------- */
-#ifdef UPTO_SQRT_OF_LIMIT
-	#define STOP_COND(start) (start * start)
-#else
-	#define STOP_COND(start) (start)
-#endif
-
 /* --------------- Everything else... --------------- */
 
 sieve_t sieve[SIEVE_SIZE] = {0};
@@ -6382,47 +6375,56 @@ void * compute_primes(void * args){
 	struct prime_stats_t * stats = (struct prime_stats_t *)args;
 	int thread_id = stats->thread_id;
 
+	int i;
+
+	/* ---------- Set start position ---------- */
+	int initial_index;
 	int wheel_index = 0;
 	int64_t start = START_PRIME;
-
-	int i;
 	for(i = 0; i < thread_id; i++){
 		start += next_from_wheel(&wheel_index);
 	}
+	initial_index = wheel_index;
 
+	/* ---------- Sieve ---------- */
 	int64_t sieving_num = start;
-	while(STOP_COND(sieving_num) <= PRIME_LIMIT){
-		int sieve_wheel_index;
-		int64_t multiple;
-		#ifdef START_AT_SQUARE_OF_PRIME
-			multiple = sieving_num;
-			sieve_wheel_index = wheel_index;
-		#else
-			multiple = start;
-			sieve_wheel_index = thread_id;
-		#endif
+	while(sieving_num * sieving_num <= PRIME_LIMIT){
+		int sieve_wheel_index = wheel_index;
+
+		int64_t multiple = sieving_num;
 		while(sieving_num * multiple <= PRIME_LIMIT){
 			SET_NONPRIME(sieve, sieving_num * multiple);
-			#ifdef CHECK_NUM_TIMES_VISITED
-				visited[sieving_num * multiple]++;
-			#endif
-
 			multiple += next_from_wheel(&sieve_wheel_index);
 		}
 		sieving_num += multiple_from_wheel(&wheel_index);
 	}
 
+	/* ---------- Find count and sum ---------- */
+	int64_t count = 0;
+	int64_t sum = 0;
+	int64_t index;
+
+	wheel_index = initial_index;
+	for(index = start; index <= PRIME_LIMIT; index += multiple_from_wheel(&wheel_index)){
+		if(IS_PRIME(sieve, index)){
+			sum += index;
+			count++;
+		}
+	}
+
+	stats->sum = sum;
+	stats->count = count;
+
 	return NULL;
 }
 
-void * count_and_sum_primes(void * args){
+void * record_primes(void * args){
 	struct prime_stats_t * stats = (struct prime_stats_t *)args;
 	int thread_id = stats->thread_id;
 
-	int i;
+	stats->primes_arr = (primes_t *) malloc(sizeof(primes_t) * ((PRIME_LIMIT / NUM_THREADS) + 1));
 
-	int count = 0;
-	int64_t sum = 0;
+	int64_t i;
 
 	int start = START_PRIME;
 	int index = 0;
@@ -6430,24 +6432,10 @@ void * count_and_sum_primes(void * args){
 		start += next_from_wheel(&index);
 	}
 
-	FILE *out = fopen("4_digit_primes.txt", "a");
 	for(i = start; i <= PRIME_LIMIT; i += multiple_from_wheel(&index)){
-		#ifdef CHECK_NUM_TIMES_VISITED
-			if(visited[i] > 1){
-				printf("%d\n", i);
-			}
-		#endif
 		if(IS_PRIME(sieve, i)){
-			if(i > 999 && i < 10000)
-				fprintf(out, "%d\n", i);
-			sum += i;
-			count++;
 		}
 	}
-	fclose(out);
-
-	stats->sum = sum;
-	stats->count = count;
 
 	return NULL;
 }
@@ -6466,97 +6454,36 @@ int main(void){
 	#ifdef USE_WHEEL_CACHE
 		init_wheel_cache();
 	#endif
-	int i, ret;
 	pthread_t threads[NUM_THREADS];
 	struct prime_stats_t stats[NUM_THREADS];
-
 
 	/* ---------- Start timing ---------- */
 	time_t start = time(NULL);
 
-	#define USE_BARRIER
-	#ifdef USE_BARRIER
-	// --------------- With Barrier ---------------
-		pthread_barrier_t barrier;
-		ret = pthread_barrier_init(&barrier, NULL, NUM_THREADS);
-		if(ret){
-			printf("Barrier creation failed\n");
-			return 1;
-		}
+	/* ---------- Initialize the barrier ---------- */
+	pthread_barrier_t barrier;
+	pthread_barrier_init(&barrier, NULL, NUM_THREADS);
 
-		for(i = 0; i < NUM_THREADS; i++){
-			stats[i].thread_id = i;
-			stats[i].barrier = &barrier;
-			ret = pthread_create(&threads[i], NULL, &find_and_record_primes, &stats[i]);
-			if(ret){
-				printf("Thread creation failed with error: %d\n", ret);
-				return 1;
-			}
-		}
+	/* ---------- Create and run threads ---------- */
+	int i;
+	for(i = 0; i < NUM_THREADS; i++){
+		stats[i].thread_id = i;
+		stats[i].barrier = &barrier;
+		pthread_create(&threads[i], NULL, &find_and_record_primes, &stats[i]);
+	}
 
-		for(i = 0; i < NUM_THREADS; i++){
-			pthread_join(threads[i], NULL);
-		}
+	/* ---------- Wait for threads to finish ---------- */
+	for(i = 0; i < NUM_THREADS; i++){
+		pthread_join(threads[i], NULL);
+	}
 
-		int count = WHEEL_COUNT;
-		int64_t sum = WHEEL_SUM;
-		for(i = 0; i < NUM_THREADS; i++){
-			count += stats[i].count;
-			sum += stats[i].sum;
-		}
-	#else
-	// --------------- No Barrier ---------------
-		/* ---------- Create NUM_THREADS to run 'compute_primes' ---------- */
-		for(i = 0; i < NUM_THREADS; i++){
-			stats[i].thread_id = i;
-			ret = pthread_create(&threads[i], NULL, &compute_primes, &stats[i].thread_id);
-			if(ret){
-				printf("Thread creation failed with error: %d\n", ret);
-			}
-		}
-
-		/* ---------- Wait for all threads to finish ---------- */
-		for(i = 0; i < NUM_THREADS; i++){
-			pthread_join(threads[i], NULL);
-		}
-
-		/* ---------- Find sum and count of primes ---------- */
-		#ifdef PARALLEL_PRIME_COUNT
-			for(i = 0; i < NUM_THREADS; i++){
-				stats[i].thread_id = i;
-				ret = pthread_create(&threads[i], NULL, &count_and_sum_primes, &stats[i]);
-				if(ret){
-					printf("Thread creation failed with error: %d\n", ret);
-				}
-			}
-
-			for(i = 0; i < NUM_THREADS; i++){
-				pthread_join(threads[i], NULL);
-			}
-
-			int count = WHEEL_COUNT;
-			int64_t sum = WHEEL_SUM;
-			for(i = 0; i < NUM_THREADS; i++){
-				count += stats[i].count;
-				sum += stats[i].sum;
-			}
-		#else
-			int64_t sum = WHEEL_SUM;
-			int count = WHEEL_COUNT;
-			int index = 0;
-			for(i = START_PRIME; i <= PRIME_LIMIT; i += next_from_wheel(&index)){
-				#ifdef CHECK_NUM_TIMES_VISITED
-					if(visited[i] > 1){
-						printf("%d\n", i);
-					}
-				#endif
-				if(IS_PRIME(sieve, i)){
-					sum += i;
-					count++;
-				}
-			}
-		#endif
-	#endif
+	/* ---------- Collate Data ---------- */
+	int count = WHEEL_COUNT;
+	int64_t sum = WHEEL_SUM;
+	for(i = 0; i < NUM_THREADS; i++){
+		count += stats[i].count;
+		sum += stats[i].sum;
+	}
 
 	/* ---------- Finish timing ---------- */
 	time_t end = time(NULL);

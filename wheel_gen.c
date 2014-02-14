@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define WHEEL_LENGTH 7
+#define WHEEL_LENGTH 3
 #define PRINT_LENGTH
 #define PRINT_WHEEL
 

@@ -24,6 +24,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 
+#define KB (1 << 10)
+#define L1_CACHE_SIZE (32 * KB)
+
 /* --------------- Options --------------- */
 // PERFORMANCE
 #define NUM_THREADS 8
@@ -32,6 +35,7 @@
 #define USE_BITSET
 #define PARALLEL_PRIME_COUNT
 #define USE_WHEEL_CACHE
+#define SEGMENT_SIZE L1_CACHE_SIZE
 
 // PRINTING
 #define PRINT_ALL
@@ -54,7 +58,7 @@ void * compute_primes(void * arg);
 void * record_primes(void * args);
 void * count_and_sum_primes(void * args);
 void * find_and_record_primes(void * args);
-void init_wheel_cache();
+void * init_wheel_cache(void * args);
 int main(void);
 inline int multiple_from_wheel(int * index);
 inline int next_from_wheel(int * index);
@@ -63,6 +67,7 @@ inline int next_from_wheel(int * index);
 struct prime_stats_t{
 	int thread_id;
 	int64_t sum;
+	int64_t segment_size;
 	primes_t count;
 	primes_t * primes_arr;
 	pthread_barrier_t * barrier;
@@ -74,26 +79,31 @@ struct prime_stats_t{
 	#define WHEEL_LEN 1
 	#define START_PRIME 2
 	#define WHEEL_SUM (0)
+	#define WHEEL_PRODUCT (1)
 	int wheel[] = {1};
 #elif WHEEL_COUNT == 1 // A 2 wheel
 	#define WHEEL_LEN 1
 	#define START_PRIME 3
 	#define WHEEL_SUM (2)
+	#define WHEEL_PRODUCT (1 * 2)
 	int wheel[] = {2};
 #elif WHEEL_COUNT == 2 // A 23 wheel
 	#define WHEEL_LEN 2
 	#define START_PRIME 5
 	#define WHEEL_SUM (2 + 3)
+	#define WHEEL_PRODUCT (2 * 3)
 	int wheel[] = {2, 4};
 #elif WHEEL_COUNT == 3 // A 235 wheel
 	#define WHEEL_LEN 8
 	#define START_PRIME 7
 	#define WHEEL_SUM (2 + 3 + 5)
+	#define WHEEL_PRODUCT (2 * 3 * 5)
 	int wheel[] = {4, 2, 4, 2, 4, 6, 2, 6};
 #elif WHEEL_COUNT == 4 // A 2357 wheel
 	#define WHEEL_LEN 48
 	#define START_PRIME 11
 	#define WHEEL_SUM (2 + 3 + 5 + 7)
+	#define WHEEL_PRODUCT (2 * 3 * 5 * 7)
 	int wheel[] = {
 		2, 4, 2, 4, 6, 2, 6, 4, 2, 4, 6, 6, 2, 6, 4, 2,
                 6, 4, 6, 8, 4, 2, 4, 2, 4, 8, 6, 4, 6, 2, 4, 6,
@@ -103,6 +113,7 @@ struct prime_stats_t{
 	#define WHEEL_LEN 480
 	#define START_PRIME 13
 	#define WHEEL_SUM (2 + 3 + 5 + 7 + 11)
+	#define WHEEL_PRODUCT (2 * 3 * 5 * 7 * 11)
 	int wheel[] = {
 		4, 2, 4, 6, 2, 6, 4, 2, 4, 6, 6, 2, 6, 4, 2, 6,
 		4, 6, 8, 4, 2, 4, 2, 4, 14, 4, 6, 2, 10, 2, 6, 6,
@@ -139,6 +150,7 @@ struct prime_stats_t{
 	#define WHEEL_LEN 5760
 	#define START_PRIME 17
 	#define WHEEL_SUM (2 + 3 + 5 + 7 + 11 + 13)
+	#define WHEEL_PRODUCT (2 * 3 * 5 * 7 * 11 * 13)
 	int wheel[] = {
 		2, 4, 6, 2, 6, 4, 2, 4, 6, 6, 2, 6, 4, 2, 6, 4,
 		6, 8, 4, 2, 4, 2, 4, 14, 4, 6, 2, 10, 2, 6, 6, 4,
@@ -505,6 +517,7 @@ struct prime_stats_t{
 	#define WHEEL_LEN 92160
 	#define START_PRIME 19
 	#define WHEEL_SUM (2 + 3 + 5 + 7 + 11 + 13 + 17)
+	#define WHEEL_PRODUCT (2 * 3 * 5 * 7 * 11 * 13 * 17)
 	int wheel[] = {
 		4, 6, 2, 6, 4, 2, 4, 6, 6, 2, 6, 4, 2, 6, 4, 6,
 		8, 4, 2, 4, 2, 4, 14, 4, 6, 2, 10, 2, 6, 6, 4, 6,
@@ -6332,9 +6345,18 @@ int bittest(unsigned char * array, int64_t index){
 /* --------------- Whether to cache multipe wheel calls --------------- */
 #ifdef USE_WHEEL_CACHE
 int wheel_cache[WHEEL_LEN] = {0};
-void init_wheel_cache(){
+void * init_wheel_cache(void * args){
+	int thread_id, num_threads;
+	if(args != NULL){
+		thread_id = ((struct prime_stats_t *)args)->thread_id;
+		num_threads = NUM_THREADS;
+	}else{
+		thread_id = 0;
+		num_threads = 1;
+	}
+
 	int index;
-	for(index = 0; index < WHEEL_LEN; index++){
+	for(index = thread_id; index < WHEEL_LEN; index += num_threads){
 		int sum = 0;
 		int i;
 		for(i = 0; i < NUM_THREADS; i++){
@@ -6342,6 +6364,8 @@ void init_wheel_cache(){
 		}
 		wheel_cache[index] = sum;
 	}
+
+	return NULL;
 }
 
 inline int multiple_from_wheel(int * index){
@@ -6371,9 +6395,34 @@ inline int next_from_wheel(int * index){
 	return temp;
 }
 
+inline int64_t wheel_product(int upto){
+	int64_t product = 1;
+
+	int i;
+	for(i = 2; i <= upto; i++){
+		product *= i;
+	}
+
+	return product;
+}
+
+/* inline int64_t gcd(int64_t a, int64_t b){ */
+/* 	while(b){ */
+/* 		int64_t temp = a%b; */
+/* 		a = b; */
+/* 		b = temp; */
+/* 	} */
+/* 	return a; */
+/* } */
+
 void * compute_primes(void * args){
 	struct prime_stats_t * stats = (struct prime_stats_t *)args;
 	int thread_id = stats->thread_id;
+
+	#ifdef USE_WHEEL_CACHE
+		init_wheel_cache(stats);
+		pthread_barrier_wait(stats->barrier);
+	#endif
 
 	int i;
 
@@ -6400,7 +6449,7 @@ void * compute_primes(void * args){
 	}
 
 	/* ---------- Wait for all threads to finish ---------- */
-	// I want to change this so as soon as a thread is finished, 
+	// I want to change this so as soon as a thread is finished,
 	// it can start on the next section (safely)
 	pthread_barrier_wait(stats->barrier);
 
@@ -6426,9 +6475,6 @@ void * compute_primes(void * args){
 }
 
 int main(void){
-	#ifdef USE_WHEEL_CACHE
-		init_wheel_cache();
-	#endif
 	pthread_t threads[NUM_THREADS];
 	struct prime_stats_t stats[NUM_THREADS];
 
@@ -6444,7 +6490,7 @@ int main(void){
 	for(i = 0; i < NUM_THREADS; i++){
 		stats[i].thread_id = i;
 		stats[i].barrier = &barrier;
-		pthread_create(&threads[i], NULL, &find_and_record_primes, &stats[i]);
+		pthread_create(&threads[i], NULL, &compute_primes, &stats[i]);
 	}
 
 	/* ---------- Wait for threads to finish ---------- */
